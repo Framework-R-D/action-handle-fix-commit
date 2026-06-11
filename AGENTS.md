@@ -45,7 +45,6 @@ extracted for standalone reuse.
 | `.github/workflows/ci.yaml` | CI: actionlint, YAML, Markdown, CodeQL |
 | `.github/dependabot.yml` | Weekly dependency updates |
 
-
 ## Development Workflow
 
 - All changes via pull request to `main`.
