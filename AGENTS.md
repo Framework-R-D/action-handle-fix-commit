@@ -14,11 +14,11 @@ extracted for standalone reuse.
 
 | Name | Description | Required | Default |
 | ---- | ----------- | -------- | ------- |
-| `tool` | The tool name reported in commit messages and PR comments. | True |  |
+| `tool` | The tool name reported in commit messages and PR comments. | True | |
 | `working-directory` | The working directory for git operations. | False | phlex-src |
-| `token` | The PAT to use for committing. | True |  |
-| `pr-info-ref` | The ref (branch name) of the PR | True |  |
-| `pr-info-repo` | The repository of the PR | True |  |
+| `token` | The PAT to use for committing. | True | |
+| `pr-info-ref` | The ref (branch name) of the PR | True | |
+| `pr-info-repo` | The repository of the PR | True | |
 | `retry-attempts` | The number of times to retry pushing the commit. | False | 6 |
 | `skip-comment` | Skip posting PR comments (for workflow_call usage) | False | false |
 
