@@ -1,5 +1,9 @@
 # Changelog
 
+## v2 --- 2026-06-25
+
+- `actions/github-script` -> 9.0.0
+
 ## v1 --- 2026-06-09
 
 ### Initial Release
