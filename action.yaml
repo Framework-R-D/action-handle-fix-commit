@@ -16,7 +16,7 @@ outputs:
     value: ${{ steps.commit_and_push.outputs.commit_sha_short }}
   patch_name:
     description: "The name of the patch file if created"
-    value: ${{ steps.create_patch.outputs.patch_name }}
+    value: ${{ steps.commit_and_push.outputs.patch_name || steps.create_patch.outputs.patch_name }}
 
 inputs:
   tool:
@@ -35,6 +35,10 @@ inputs:
   pr-info-repo:
     description: "The repository of the PR"
     required: true
+  pr-info-sha:
+    description: "Caller-approved full source SHA; missing approval permits patch generation only"
+    required: false
+    default: ""
   retry-attempts:
     description: "The number of times to retry pushing the commit."
     required: false
@@ -52,7 +56,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        if [[ -n $(git status --porcelain) ]]; then
+        if [[ -n $(git -c core.fsmonitor=false status --porcelain) ]]; then
           echo "changes=true" >> "$GITHUB_OUTPUT"
         else
           echo "changes=false" >> "$GITHUB_OUTPUT"
@@ -68,6 +72,10 @@ runs:
       id: pr-properties
       if: steps.check_changes.outputs.changes == 'true'
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        PR_REPO: ${{ inputs.pr-info-repo }}
+        PR_REF: ${{ inputs.pr-info-ref }}
+        PR_SHA: ${{ inputs.pr-info-sha }}
       with:
         script: |
           // context.issue.number is only available when the root trigger is an
@@ -84,7 +92,9 @@ runs:
             repo: context.repo.repo,
             pull_number: prNumber
           });
-          core.setOutput('maintainer_can_modify', pr.maintainer_can_modify);
+          const targetMatches = pr.head.repo?.full_name === process.env.PR_REPO &&
+            pr.head.ref === process.env.PR_REF && pr.head.sha === process.env.PR_SHA;
+          core.setOutput('maintainer_can_modify', targetMatches && pr.maintainer_can_modify);
     - name: Commit fixes
       if: >-
         steps.check_changes.outputs.changes == 'true' && (inputs.pr-info-repo == github.repository ||
@@ -96,46 +106,11 @@ runs:
         TOOL: ${{ inputs.tool }}
         TOKEN: ${{ inputs.token }}
         PR_REF: ${{ inputs.pr-info-ref }}
+        PR_REPO: ${{ inputs.pr-info-repo }}
+        PR_SHA: ${{ inputs.pr-info-sha }}
         RETRY_ATTEMPTS: ${{ inputs.retry-attempts }}
       run: |
-        git config --local user.name "github-actions[bot]"
-        git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-        trap 'rm -f ~/.git-credentials' EXIT
-        rm -f ~/.git-credentials
-        umask 077
-        cat <<EOF > ~/.git-credentials
-        https://x-access-token:$TOKEN@github.com
-        EOF
-        git config --local credential.helper 'store --file ~/.git-credentials'
-
-        git add -u
-        git commit -m "Apply $TOOL fixes"
-
-        for i in $(seq 1 "$RETRY_ATTEMPTS"); do
-          if git push origin HEAD:"$PR_REF"; then
-            echo "Push successful on attempt $i."
-            COMMIT_SHA=$(git rev-parse HEAD)
-            COMMIT_SHA_SHORT=$(git rev-parse --short HEAD)
-            echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
-            echo "commit_sha_short=$COMMIT_SHA_SHORT" >> "$GITHUB_OUTPUT"
-            echo "pushed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$i" -eq "$RETRY_ATTEMPTS" ]; then
-            break
-          fi
-          echo "Push failed on attempt $i. Fetching and rebasing before retry..."
-          git fetch origin
-          if ! git rebase origin/"$PR_REF"; then
-            echo "::error::Automatic rebase failed. Please resolve conflicts manually."
-            exit 1
-          fi
-          echo "Waiting before retry..."
-          sleep $((5 * i))
-        done
-        echo "::error::Failed to push changes after multiple retries."
-        exit 1
+        python3 "$GITHUB_ACTION_PATH/handle_fix_commit.py"
 
     - name: Notify of commit
       if:
@@ -156,24 +131,30 @@ runs:
       id: create_patch
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        TOOL: ${{ inputs.tool }}
+        PR_REF: ${{ inputs.pr-info-ref }}
+        PR_REPO: ${{ inputs.pr-info-repo }}
+        PR_SHA: ${{ inputs.pr-info-sha }}
+        RETRY_ATTEMPTS: ${{ inputs.retry-attempts }}
+        PATCH_ONLY: "true"
       run: |
-        git diff > fix.patch
-        echo "patch_name=fix.patch" >> "$GITHUB_OUTPUT"
+        python3 "$GITHUB_ACTION_PATH/handle_fix_commit.py"
 
     - name: Upload patch
-      if: steps.create_patch.outputs.patch_name
+      if: steps.commit_and_push.outputs.patch_name || steps.create_patch.outputs.patch_name
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: fix-patch
-        path: ${{ inputs.working-directory }}/${{ steps.create_patch.outputs.patch_name }}
+        path: ${{ inputs.working-directory }}/${{ steps.commit_and_push.outputs.patch_name || steps.create_patch.outputs.patch_name }}
 
     - name: Comment with patch instructions
-      if: steps.create_patch.outputs.patch_name && inputs.skip-comment != 'true'
+      if: (steps.commit_and_push.outputs.patch_name || steps.create_patch.outputs.patch_name) && inputs.skip-comment != 'true'
       uses: thollander/actions-comment-pull-request@24bffb9b452ba05a4f3f77933840a6a841d1b32b # v3.0.1
       with:
         # yamllint disable rule:line-length
         message: |
-          Automatic fixes are available but could not be applied directly because this PR is from a fork and "Allow edits from maintainers" is not enabled.
+          Automatic fixes are available as a patch because write access, immutable approval, or the unchanged target snapshot could not be confirmed.
           Please apply the patch below to fix the issues:
           1. **Download the patch file:** You can download the patch from the "Artifacts" section of this workflow run.
           2. **Apply the patch:**
