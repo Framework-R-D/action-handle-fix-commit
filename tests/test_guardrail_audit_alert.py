@@ -59,7 +59,9 @@ class GuardrailAlertTests(unittest.TestCase):
                 "import json, os, sys\n"
                 'with open(os.environ["CURL_ARGS"], "w") as stream:\n'
                 "    json.dump(sys.argv[1:], stream)\n"
-                'print("ok")\nprint(os.environ["HTTP_STATUS"])\n'
+                'print("ok")\n'
+                'if "--write-out" in sys.argv[1:]:\n'
+                '    print(os.environ["HTTP_STATUS"])\n'
                 'sys.exit(int(os.environ["CURL_EXIT"]))\n'
             )
             curl.chmod(0o755)
@@ -148,7 +150,7 @@ class GuardrailAlertTests(unittest.TestCase):
     def test_forced_push_alerts_without_lookup(self) -> None:
         """A force push never earns a PR exemption, including bot pushes."""
         result, curl, gh = self.run_script(
-            FORCED_PUSH="true", GH_EXIT="1", ACTOR="dependabot[bot]", PUSHED_AT=""
+            FORCED_PUSH="true", GH_EXIT="1", ACTOR="dependabot[bot]"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsNotNone(curl)
@@ -200,6 +202,11 @@ class GuardrailAlertTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode == 0, status == "200")
                 self.assertIsNotNone(curl)
+                assert curl is not None
+                self.assertIn("--write-out", curl)
+                self.assertIn("--fail-with-body", curl)
+                self.assertIn("--max-time", curl)
+                self.assertEqual(curl[curl.index("--max-time") + 1], "15")
 
     def test_payload_escapes_untrusted_values(self) -> None:
         """Messages and actor names stay data rather than executable shell input."""

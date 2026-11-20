@@ -62,7 +62,7 @@ jobs:
             --arg actor "$ACTOR" \
             '{text: "⚠️ *Direct Push to Main Detected!*\n*Repo:* `\($repo)`\n*Actor:* `@\($actor)`\n*Commit:* `\($msg)`"}')
 
-          SLACK_RESPONSE=$(curl --fail-with-body --silent --show-error -X POST \
+          SLACK_RESPONSE=$(curl --fail-with-body --silent --show-error --max-time 15 -X POST \
             -H 'Content-type: application/json' --data "$PAYLOAD" \
             --write-out '\n%{http_code}' "$SLACK_URL")
           SLACK_STATUS=${SLACK_RESPONSE##*$'\n'}
