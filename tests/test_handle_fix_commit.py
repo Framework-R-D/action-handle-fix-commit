@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,6 +96,55 @@ class HandleFixCommitTests(unittest.TestCase):
             handle(self.source, self.settings, patch_only=True)
         self.assertEqual(victim.read_text(), "unchanged\n")
 
+    def test_nested_working_directory_preserves_files_outside_staging_scope(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nested-fix-test-") as temporary:
+            root = Path(temporary)
+            env = clean_environment(root)
+            git(root, ["init", "--quiet", "--template="], env)
+            outside = root / "README.md"
+            outside.write_text("outside\n", encoding="utf-8")
+            nested = root / "pkg"
+            nested.mkdir()
+            target = nested / "code.py"
+            target.write_text("before\n", encoding="utf-8")
+            git(root, ["add", "README.md", "pkg/code.py"], env)
+            git(
+                root,
+                ["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "base"],
+                env,
+            )
+            sha = git(root, ["rev-parse", "HEAD"], env).decode().strip()
+            target.write_text("after\n", encoding="utf-8")
+
+            def verify_commit(
+                cwd, push_env, repository, branch, approved, commit, token, attempts
+            ):
+                self.assertEqual(git(cwd, ["show", f"{commit}:README.md"], push_env), b"outside\n")
+                self.assertEqual(git(cwd, ["show", f"{commit}:pkg/code.py"], push_env), b"after\n")
+                return True
+
+            with patch("handle_fix_commit.push_snapshot", side_effect=verify_commit):
+                outputs = handle(
+                    nested,
+                    self.settings | {"PR_SHA": sha},
+                )
+            self.assertEqual(outputs["pushed"], "true")
+
+    def test_sparse_checkout_fails_before_staging(self) -> None:
+        git(self.source, ["config", "core.sparseCheckout", "true"], self.env)
+        with patch("handle_fix_commit.push_snapshot") as network:
+            with self.assertRaisesRegex(ValueError, "Sparse checkouts are not supported"):
+                handle(self.source, self.settings)
+        network.assert_not_called()
+
+    def test_tracked_deletions_remain_supported_in_complete_checkout(self) -> None:
+        self.file.unlink()
+        outputs = handle(self.source, self.settings, patch_only=True)
+        self.assertEqual(outputs["patch_name"], "fix.patch")
+        patch_text = (self.source / "fix.patch").read_text(encoding="utf-8")
+        self.assertIn("--- a/example.txt", patch_text)
+        self.assertIn("+++ /dev/null", patch_text)
+
     def test_moved_head_including_another_trusted_formatter_never_rebases(self) -> None:
         for moved in ["a" * 40, "b" * 40]:
             with (
@@ -121,11 +171,16 @@ class HandleFixCommitTests(unittest.TestCase):
         commit = "c" * 40
         ref = "refs/heads/feature/test"
         expected = f"{self.sha}\t{ref}\n".encode()
-        succeeded = f"{commit}\t{ref}\n".encode()
-        with patch(
-            "handle_fix_commit.git",
-            side_effect=[expected, b"", expected, expected, b"", succeeded],
-        ) as mocked:
+        with (
+            patch("handle_fix_commit.git", side_effect=[expected, expected, expected]) as mocked,
+            patch(
+                "handle_fix_commit.git_result",
+                side_effect=[
+                    subprocess.CompletedProcess([], 1, b"", b"failed"),
+                    subprocess.CompletedProcess([], 0, b"pushed", b""),
+                ],
+            ) as pushes,
+        ):
             self.assertTrue(
                 push_snapshot(
                     self.source,
@@ -138,12 +193,62 @@ class HandleFixCommitTests(unittest.TestCase):
                     2,
                 )
             )
-        pushes = [call for call in mocked.call_args_list if call.args[1][0] == "push"]
-        self.assertEqual(len(pushes), 2)
-        for call in pushes:
+        self.assertEqual(pushes.call_count, 2)
+        for call in pushes.call_args_list:
             self.assertIn(f"--force-with-lease={ref}:{self.sha}", call.args[1])
             self.assertIn("https://github.com/Example/target.git", call.args[1])
             self.assertNotIn("TEST_SENTINEL", " ".join(call.args[1]))
+        self.assertEqual(mocked.call_count, 3)
+
+    def test_acknowledged_push_succeeds_without_a_followup_lookup(self) -> None:
+        ref = "refs/heads/feature/test"
+        expected = f"{self.sha}\t{ref}\n".encode()
+        with (
+            patch("handle_fix_commit.git", return_value=expected) as lookup,
+            patch(
+                "handle_fix_commit.git_result",
+                return_value=subprocess.CompletedProcess([], 0, b"pushed", b""),
+            ),
+        ):
+            self.assertTrue(
+                push_snapshot(
+                    self.source,
+                    self.env,
+                    "Example/target",
+                    "feature/test",
+                    self.sha,
+                    "c" * 40,
+                    "TEST_SENTINEL",
+                    2,
+                )
+            )
+        self.assertEqual(lookup.call_count, 1)
+
+    def test_ambiguous_push_is_recovered_by_remote_ref(self) -> None:
+        """Accept a nonzero push only when the destination now names the commit."""
+        ref = "refs/heads/feature/test"
+        expected = f"{self.sha}\t{ref}\n".encode()
+        pushed = f"{'c' * 40}\t{ref}\n".encode()
+        with (
+            patch("handle_fix_commit.git", side_effect=[expected, pushed]) as lookup,
+            patch(
+                "handle_fix_commit.git_result",
+                return_value=subprocess.CompletedProcess([], 1, b"", b"connection lost"),
+            ),
+        ):
+            self.assertTrue(
+                push_snapshot(
+                    self.source,
+                    self.env,
+                    "Example/target",
+                    "feature/test",
+                    self.sha,
+                    "c" * 40,
+                    "TEST_SENTINEL",
+                    2,
+                )
+            )
+        self.assertEqual(lookup.call_count, 2)
 
     def test_inherited_secret_and_git_environment_is_not_forwarded(self) -> None:
         with patch.dict(os.environ, {"GH_TOKEN": "sentinel", "GIT_CONFIG_COUNT": "99"}):

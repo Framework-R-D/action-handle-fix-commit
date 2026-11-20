@@ -25,15 +25,22 @@ def clean_environment(home: Path) -> dict[str, str]:
     }
 
 
-def git(cwd: Path, args: list[str], env: dict[str, str], *, check: bool = True) -> bytes:
+def git_result(
+    cwd: Path, args: list[str], env: dict[str, str]
+) -> subprocess.CompletedProcess[bytes]:
     """Run Git without printing subprocess output or secret-bearing arguments."""
-    result = subprocess.run(
+    return subprocess.run(
         ["git", "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", *args],
         cwd=cwd,
         env=env,
         capture_output=True,
         check=False,
     )
+
+
+def git(cwd: Path, args: list[str], env: dict[str, str], *, check: bool = True) -> bytes:
+    """Return successful Git output while keeping diagnostics private."""
+    result = git_result(cwd, args, env)
     if check and result.returncode:
         raise ValueError("Git operation failed; no subprocess output was disclosed")
     return result.stdout if result.returncode == 0 else b""
@@ -68,7 +75,7 @@ def push_snapshot(
             return True  # An interrupted push may already have succeeded.
         if result != f"{sha}\t{ref}\n".encode():
             return False
-        git(
+        push = git_result(
             cwd,
             [
                 "push",
@@ -79,8 +86,9 @@ def push_snapshot(
                 f"{commit}:{ref}",
             ],
             network_env,
-            check=False,
         )
+        if push.returncode == 0:
+            return True
         if git(cwd, ["ls-remote", "--refs", url, ref], network_env, check=False) == (
             f"{commit}\t{ref}\n".encode()
         ):
@@ -115,6 +123,12 @@ def handle(source: Path, settings: dict[str, str], *, patch_only: bool = False) 
         head = git(source, ["rev-parse", "--verify", "HEAD^{commit}"], env).decode().strip()
         if approved and head != approved:
             raise ValueError("Checkout HEAD does not match the approved source SHA")
+        sparse = git(
+            source, ["config", "--bool", "--get", "core.sparseCheckout"], env, check=False
+        )
+        if sparse.strip() == b"true":
+            raise ValueError("Sparse checkouts are not supported")
+        work_tree = Path(os.fsdecode(git(source, ["rev-parse", "--show-toplevel"], env)).strip())
         common = git(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"], env)
         objects = Path(os.fsdecode(common).strip()) / "objects"
         if any(c in str(objects) for c in "\r\n"):
@@ -122,7 +136,7 @@ def handle(source: Path, settings: dict[str, str], *, patch_only: bool = False) 
         git(isolated, ["init", "--quiet", "--template="], env)
         # Only objects are shared; source hooks, remotes, credential helpers and filters are not.
         (isolated / ".git/objects/info/alternates").write_text(f"{objects}\n", encoding="utf-8")
-        env = env | {"GIT_WORK_TREE": str(source), "GIT_DIR": str(isolated / ".git")}
+        env = env | {"GIT_WORK_TREE": str(work_tree), "GIT_DIR": str(isolated / ".git")}
         git(isolated, ["read-tree", head], env)
         git(source, ["add", "-u", "--", "."], env)
         patch = git(
